@@ -25,7 +25,7 @@
     <button id="start" type="button" disabled>Activar cámara</button>
     <button id="close" class="secondary" type="button">Cerrar lector</button>
     <p id="status" class="status" role="status" aria-live="polite"></p>
-    <p class="privacy">Escaneo único por apertura. El código no se guarda en esta página.</p>
+    <p class="privacy">Podés escanear varios códigos en la misma sesión. Cada lectura requiere una acción; los reintentos del mismo mensaje no se vuelven a procesar.</p>
   </main>
   <script src="./jsqr.js"></script>
   <script>
@@ -38,24 +38,38 @@
     const connection=document.getElementById('connection'),statusNode=document.getElementById('status');
     const startButton=document.getElementById('start'),closeButton=document.getElementById('close');
     const video=document.getElementById('camera'),viewport=document.getElementById('viewport');
-    let stream=null,animation=0,ready=false,consumed=false,frameBusy=false,detector=null;
+    let stream=null,animation=0,ready=false,pendingMessageId='',pendingCode='',sendAttempts=0,ackTimer=0,frameBusy=false,detector=null,scanSequence=0;
     const validOrigin=value=>{try{const u=new URL(value);return (u.protocol==='https:'||u.hostname==='localhost'||u.hostname==='127.0.0.1')&&u.origin===value;}catch(_){return false;}};
     const setStatus=(text,kind='')=>{statusNode.textContent=text;statusNode.dataset.kind=kind;};
     const post=(type,extra={})=>{if(window.opener&&!window.opener.closed&&validOrigin(parentOrigin))window.opener.postMessage({channel:CHANNEL,type,sessionId,...extra},parentOrigin);};
+    const newMessageId=()=>{if(crypto.randomUUID)return crypto.randomUUID();const bytes=new Uint8Array(16);crypto.getRandomValues(bytes);return Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('')+'-'+(++scanSequence);};
+    function prepareResume(){if(!ready||pendingMessageId)return;startButton.hidden=false;startButton.disabled=false;startButton.textContent='Reanudar cámara';}
     function stopCamera(){if(animation)cancelAnimationFrame(animation);animation=0;stream?.getTracks().forEach(track=>{try{track.stop();}catch(_){}});stream=null;video.srcObject=null;viewport.dataset.active='false';}
+    function sendPending(){
+      if(!pendingMessageId)return;
+      sendAttempts++;startButton.hidden=false;startButton.disabled=true;startButton.textContent='Esperando respuesta…';
+      setStatus('Enviando el código al POS…');post('QR_RESULT',{code:pendingCode,messageId:pendingMessageId});
+      clearTimeout(ackTimer);
+      ackTimer=setTimeout(()=>{
+        if(!pendingMessageId)return;
+        if(sendAttempts<3)sendPending();
+        else{startButton.disabled=false;startButton.textContent='Reintentar envío';setStatus('No llegó la confirmación del POS. Podés reintentar este mismo envío sin duplicar la operación.','error');}
+      },1400);
+    }
+    function retryOrStart(){if(pendingMessageId){if(sendAttempts>=3)sendAttempts=0;sendPending();}else startCamera();}
     async function startCamera(){
-      if(!ready||consumed||stream)return;
-      startButton.disabled=true;setStatus('Solicitando acceso a la cámara…');
+      if(!ready||pendingMessageId||stream||document.hidden)return;
+      startButton.disabled=true;startButton.textContent='Abriendo cámara…';setStatus('Solicitando acceso a la cámara…');
       try{
         if(!navigator.mediaDevices?.getUserMedia)throw new Error('Este navegador no ofrece acceso a la cámara.');
         stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}}});
         video.srcObject=stream;viewport.dataset.active='true';await video.play();
         if('BarcodeDetector'in window){try{detector=new BarcodeDetector({formats:['qr_code']});}catch(_){detector=null;}}
-        setStatus('Cámara lista. Enfocá un único QR.');requestAnimationFrame(scanFrame);
-      }catch(error){stopCamera();startButton.disabled=false;setStatus('No se pudo abrir la cámara: '+(error.message||String(error))+' Podés volver al POS e ingresar el código manualmente.','error');}
+        startButton.hidden=true;setStatus('Cámara lista. Enfocá un QR; al terminar podés escanear otro.');requestAnimationFrame(scanFrame);
+      }catch(error){stopCamera();startButton.hidden=false;startButton.disabled=false;startButton.textContent='Reanudar cámara';setStatus('No se pudo abrir la cámara: '+(error.message||String(error))+' Podés volver al POS e ingresar el código manualmente.','error');}
     }
     async function scanFrame(){
-      if(!stream||consumed||frameBusy)return;
+      if(!stream||pendingMessageId||frameBusy)return;
       frameBusy=true;
       try{
         let raw='';
@@ -66,19 +80,23 @@
           const context=canvas.getContext('2d',{willReadFrequently:true});context.drawImage(video,0,0,canvas.width,canvas.height);
           const pixels=context.getImageData(0,0,canvas.width,canvas.height);raw=window.jsQR(pixels.data,pixels.width,pixels.height)?.data||'';
         }
-        if(raw&&!consumed){consumed=true;stopCamera();setStatus('Código leído. Enviándolo al Punto de venta…');post('QR_RESULT',{code:raw,messageId:crypto.randomUUID?.()||String(Date.now())});}
-      }catch(error){stopCamera();startButton.disabled=false;setStatus('No se pudo leer el QR: '+(error.message||String(error)),'error');}
-      finally{frameBusy=false;if(stream&&!consumed)animation=requestAnimationFrame(scanFrame);}
+        if(raw&&!pendingMessageId){pendingMessageId=newMessageId();pendingCode=raw;sendAttempts=0;stopCamera();sendPending();}
+      }catch(error){stopCamera();startButton.hidden=false;startButton.disabled=false;startButton.textContent='Reanudar cámara';setStatus('No se pudo leer el QR: '+(error.message||String(error)),'error');}
+      finally{frameBusy=false;if(stream&&!pendingMessageId)animation=requestAnimationFrame(scanFrame);}
     }
     function closeReader(){stopCamera();post('READER_CLOSED');window.close();setStatus('Podés cerrar esta pestaña.');}
     window.addEventListener('message',event=>{
       if(event.origin!==parentOrigin||event.source!==window.opener||!event.data||event.data.channel!==CHANNEL||event.data.sessionId!==sessionId)return;
       if(event.data.type==='INIT'&&!ready){ready=true;connection.textContent='Conexión segura con el POS lista.';startButton.disabled=false;setStatus('Tocá “Activar cámara” para iniciar el escaneo.');}
       else if(event.data.type==='CLOSE'){closeReader();}
-      else if(event.data.type==='ACK'&&consumed){setStatus(event.data.accepted?'Código recibido correctamente por el POS.':'El POS recibió el código, pero lo rechazó. Revisá el mensaje en el dashboard.',event.data.accepted?'success':'error');startButton.hidden=true;}
+      else if(event.data.type==='ACK'&&pendingMessageId&&event.data.messageId===pendingMessageId){
+        const accepted=event.data.accepted===true;
+        setStatus(String(event.data.message|| (accepted?'Código procesado por el POS.':'El POS rechazó el código, sin un motivo adicional.')),accepted?'success':'error');
+        clearTimeout(ackTimer);ackTimer=0;pendingMessageId='';pendingCode='';sendAttempts=0;startButton.hidden=false;startButton.disabled=false;startButton.textContent='Escanear otro QR';
+      }
     });
-    startButton.addEventListener('click',startCamera);closeButton.addEventListener('click',closeReader);
-    document.addEventListener('visibilitychange',()=>{if(document.hidden)stopCamera();});
+    startButton.addEventListener('click',retryOrStart);closeButton.addEventListener('click',closeReader);
+    document.addEventListener('visibilitychange',()=>{if(document.hidden)stopCamera();else prepareResume();});
     window.addEventListener('pagehide',stopCamera);window.addEventListener('beforeunload',stopCamera);
     if(!window.opener||window.opener.closed||!sessionId||sessionId.length<24||!validOrigin(parentOrigin)){
       connection.textContent='Abrí este lector desde el botón Cámara del Punto de venta para iniciar una sesión segura.';
@@ -88,4 +106,3 @@
   </script>
 </body>
 </html>
-
