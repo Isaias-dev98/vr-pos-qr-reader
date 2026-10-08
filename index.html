@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="referrer" content="no-referrer">
+  <meta name="color-scheme" content="light dark">
+  <title>Lector QR · VR iStore</title>
+  <style>
+    :root{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;color-scheme:light dark;--bg:#f4f6fa;--card:#fff;--ink:#15213b;--muted:#65728a;--line:#d8deea;--blue:#1267e8;--good:#087c4c;--bad:#b42318}
+    @media(prefers-color-scheme:dark){:root{--bg:#101722;--card:#192333;--ink:#f3f6fc;--muted:#abb7ca;--line:#344255;--blue:#75a9ff;--good:#52d69a;--bad:#ff8379}}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);min-height:100svh;display:grid;place-items:center;padding:20px}
+    main{width:min(100%,560px);background:var(--card);border:1px solid var(--line);border-radius:24px;padding:clamp(18px,5vw,32px);box-shadow:0 16px 48px #0002}
+    header{display:flex;align-items:center;gap:12px;margin-bottom:18px}.mark{width:42px;height:42px;border-radius:14px;background:var(--blue);color:#fff;display:grid;place-items:center;font-weight:800}.eyebrow{font-size:.78rem;color:var(--muted);margin:0 0 3px}h1{font-size:1.35rem;line-height:1.2;margin:0}p{line-height:1.55;color:var(--muted)}
+    .notice{border:1px solid var(--line);border-radius:14px;padding:12px 14px;margin:16px 0}.viewport{display:none;position:relative;width:100%;aspect-ratio:4/3;overflow:hidden;background:#080b10;border-radius:18px;margin:16px 0}.viewport[data-active="true"]{display:block}video{width:100%;height:100%;object-fit:cover}.reticle{position:absolute;inset:17%;border:2px solid #4ce0a4;border-radius:18px;box-shadow:0 0 0 999px #0003;pointer-events:none}
+    button{width:100%;min-height:50px;border:0;border-radius:14px;padding:12px 18px;font:inherit;font-weight:700;background:var(--blue);color:#fff;cursor:pointer}button:focus-visible{outline:3px solid #ffa928;outline-offset:3px}button.secondary{background:transparent;color:var(--ink);border:1px solid var(--line);margin-top:10px}button:disabled{opacity:.55;cursor:wait}.status{min-height:28px;margin:12px 0 0;font-weight:650}.status[data-kind="error"]{color:var(--bad)}.status[data-kind="success"]{color:var(--good)}.privacy{font-size:.78rem;margin:16px 0 0}
+  </style>
+</head>
+<body>
+  <main>
+    <header><div class="mark" aria-hidden="true">VR</div><div><p class="eyebrow">Punto de venta</p><h1>Lector QR independiente</h1></div></header>
+    <p>Esta página sólo usa la cámara para leer un código y devolver su texto al POS que la abrió. No recibe catálogo, precios, carrito ni credenciales.</p>
+    <div id="connection" class="notice" role="status">Conectando con el Punto de venta…</div>
+    <div id="viewport" class="viewport"><video id="camera" autoplay playsinline muted aria-label="Vista de cámara"></video><div class="reticle" aria-hidden="true"></div></div>
+    <button id="start" type="button" disabled>Activar cámara</button>
+    <button id="close" class="secondary" type="button">Cerrar lector</button>
+    <p id="status" class="status" role="status" aria-live="polite"></p>
+    <p class="privacy">Escaneo único por apertura. El código no se guarda en esta página.</p>
+  </main>
+  <script src="./jsqr.js"></script>
+  <script>
+  (()=>{
+    'use strict';
+    const CHANNEL='vris-pos-qr-reader-v1';
+    const params=new URLSearchParams(location.search);
+    const sessionId=params.get('session')||'';
+    const parentOrigin=params.get('parentOrigin')||'';
+    const connection=document.getElementById('connection'),statusNode=document.getElementById('status');
+    const startButton=document.getElementById('start'),closeButton=document.getElementById('close');
+    const video=document.getElementById('camera'),viewport=document.getElementById('viewport');
+    let stream=null,animation=0,ready=false,consumed=false,frameBusy=false,detector=null;
+    const validOrigin=value=>{try{const u=new URL(value);return (u.protocol==='https:'||u.hostname==='localhost'||u.hostname==='127.0.0.1')&&u.origin===value;}catch(_){return false;}};
+    const setStatus=(text,kind='')=>{statusNode.textContent=text;statusNode.dataset.kind=kind;};
+    const post=(type,extra={})=>{if(window.opener&&!window.opener.closed&&validOrigin(parentOrigin))window.opener.postMessage({channel:CHANNEL,type,sessionId,...extra},parentOrigin);};
+    function stopCamera(){if(animation)cancelAnimationFrame(animation);animation=0;stream?.getTracks().forEach(track=>{try{track.stop();}catch(_){}});stream=null;video.srcObject=null;viewport.dataset.active='false';}
+    async function startCamera(){
+      if(!ready||consumed||stream)return;
+      startButton.disabled=true;setStatus('Solicitando acceso a la cámara…');
+      try{
+        if(!navigator.mediaDevices?.getUserMedia)throw new Error('Este navegador no ofrece acceso a la cámara.');
+        stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}}});
+        video.srcObject=stream;viewport.dataset.active='true';await video.play();
+        if('BarcodeDetector'in window){try{detector=new BarcodeDetector({formats:['qr_code']});}catch(_){detector=null;}}
+        setStatus('Cámara lista. Enfocá un único QR.');requestAnimationFrame(scanFrame);
+      }catch(error){stopCamera();startButton.disabled=false;setStatus('No se pudo abrir la cámara: '+(error.message||String(error))+' Podés volver al POS e ingresar el código manualmente.','error');}
+    }
+    async function scanFrame(){
+      if(!stream||consumed||frameBusy)return;
+      frameBusy=true;
+      try{
+        let raw='';
+        if(detector){const result=await detector.detect(video);raw=result?.[0]?.rawValue||'';}
+        else if(window.jsQR&&video.readyState>=2&&video.videoWidth){
+          const scale=Math.min(1,640/Math.max(video.videoWidth,video.videoHeight));
+          const canvas=document.createElement('canvas');canvas.width=Math.round(video.videoWidth*scale);canvas.height=Math.round(video.videoHeight*scale);
+          const context=canvas.getContext('2d',{willReadFrequently:true});context.drawImage(video,0,0,canvas.width,canvas.height);
+          const pixels=context.getImageData(0,0,canvas.width,canvas.height);raw=window.jsQR(pixels.data,pixels.width,pixels.height)?.data||'';
+        }
+        if(raw&&!consumed){consumed=true;stopCamera();setStatus('Código leído. Enviándolo al Punto de venta…');post('QR_RESULT',{code:raw,messageId:crypto.randomUUID?.()||String(Date.now())});}
+      }catch(error){stopCamera();startButton.disabled=false;setStatus('No se pudo leer el QR: '+(error.message||String(error)),'error');}
+      finally{frameBusy=false;if(stream&&!consumed)animation=requestAnimationFrame(scanFrame);}
+    }
+    function closeReader(){stopCamera();post('READER_CLOSED');window.close();setStatus('Podés cerrar esta pestaña.');}
+    window.addEventListener('message',event=>{
+      if(event.origin!==parentOrigin||event.source!==window.opener||!event.data||event.data.channel!==CHANNEL||event.data.sessionId!==sessionId)return;
+      if(event.data.type==='INIT'&&!ready){ready=true;connection.textContent='Conexión segura con el POS lista.';startButton.disabled=false;setStatus('Tocá “Activar cámara” para iniciar el escaneo.');}
+      else if(event.data.type==='CLOSE'){closeReader();}
+      else if(event.data.type==='ACK'&&consumed){setStatus(event.data.accepted?'Código recibido correctamente por el POS.':'El POS recibió el código, pero lo rechazó. Revisá el mensaje en el dashboard.',event.data.accepted?'success':'error');startButton.hidden=true;}
+    });
+    startButton.addEventListener('click',startCamera);closeButton.addEventListener('click',closeReader);
+    document.addEventListener('visibilitychange',()=>{if(document.hidden)stopCamera();});
+    window.addEventListener('pagehide',stopCamera);window.addEventListener('beforeunload',stopCamera);
+    if(!window.opener||window.opener.closed||!sessionId||sessionId.length<24||!validOrigin(parentOrigin)){
+      connection.textContent='Abrí este lector desde el botón Cámara del Punto de venta para iniciar una sesión segura.';
+      startButton.disabled=true;setStatus('No hay una sesión POS válida.','error');
+    }else{post('READY');}
+  })();
+  </script>
+</body>
+</html>
+
