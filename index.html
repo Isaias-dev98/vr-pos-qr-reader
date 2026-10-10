@@ -23,7 +23,7 @@
     <div id="connection" class="notice" role="status">Conectando con el Punto de venta…</div>
     <div id="viewport" class="viewport"><video id="camera" autoplay playsinline muted aria-label="Vista de cámara"></video><div class="reticle" aria-hidden="true"></div></div>
     <button id="start" type="button" disabled>Activar cámara</button>
-    <button id="close" class="secondary" type="button">Cerrar lector</button>
+    <button id="close" class="secondary" type="button">Terminar y volver al POS</button>
     <p id="status" class="status" role="status" aria-live="polite"></p>
     <p class="privacy">Podés escanear varios códigos en la misma sesión. Cada lectura requiere una acción; los reintentos del mismo mensaje no se vuelven a procesar.</p>
   </main>
@@ -84,7 +84,7 @@
       }catch(error){stopCamera();startButton.hidden=false;startButton.disabled=false;startButton.textContent='Reanudar cámara';setStatus('No se pudo leer el QR: '+(error.message||String(error)),'error');}
       finally{frameBusy=false;if(stream&&!pendingMessageId)animation=requestAnimationFrame(scanFrame);}
     }
-    function closeReader(){stopCamera();post('READER_CLOSED');window.close();setStatus('Podés cerrar esta pestaña.');}
+    function closeReader(){stopCamera();startButton.hidden=true;closeButton.disabled=true;setStatus('Escaneo terminado. Volvé a la pestaña “Punto de venta”; el carrito y la sesión del POS se conservan. Si el navegador no cierra esta pestaña, cambiala manualmente.','success');post('READER_CLOSED');window.close();}
     window.addEventListener('message',event=>{
       if(event.origin!==parentOrigin||event.source!==window.opener||!event.data||event.data.channel!==CHANNEL||event.data.sessionId!==sessionId)return;
       if(event.data.type==='INIT'&&!ready){ready=true;connection.textContent='Conexión segura con el POS lista.';startButton.disabled=false;setStatus('Tocá “Activar cámara” para iniciar el escaneo.');}
